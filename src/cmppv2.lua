@@ -218,6 +218,8 @@ local function parse_deliver(buf, t)
         end
     end
     t:add(f_reserved, buf(77 + length, 8))
+
+    return buf(75, 1):uint()
 end
 
 -- 解析响应
@@ -226,43 +228,93 @@ local function parse_response(buf, t)
     t:add(f_result, buf(20, 1))
 end
 
+local info="";
+
 local function cmppv2_dissector(buf,pkt,root)
     local buf_len = buf:len();
-    if buf_len < 8 then
-        return false
+    if buf_len < 8 or buf(0,4):uint() > buf_len then
+        return -1;
     end
 
-    pkt.cols.protocol = "CMPPv2"
-    local t = root:add(p_cmppv2, buf(0, buf_len))
+    pkt.cols.protocol = "CMPP"
+
+
+
+    local t = root:add(p_cmppv2, buf(0, buf(0,4):uint()))
     t:add(f_length, buf(0,4))
     t:add(f_command_id, buf(4,4))
     t:add(f_sequence_id, buf(8,4))
 
     local v_command = buf(4,4):uint()
     if v_command == 1 then
-        parse_connect(buf, t)
+        parse_connect(buf(0,(buf(0,4):uint())), t)
+        info=info.."[CONNECT] "
     elseif v_command == 4 then
-        parse_submit(buf, t)
+        parse_submit(buf(0,(buf(0,4):uint())), t)
+        info=info.."[SUBMIT] "
     elseif v_command == 5 then
-        parse_deliver(buf, t)
-    elseif v_command == 0x80000004 or v_command == 0x80000005 then
-        parse_response(buf, t)
+        if parse_deliver(buf(0,(buf(0,4):uint())), t) == 0 then
+            info=info.."[DELIVER:MESSAGE] "
+        else
+            info=info.."[DELIVER:REPORT] "
+        end
+    elseif v_command == 0x80000004 then
+        parse_response(buf(0,(buf(0,4):uint())), t)
+        info=info.."[SUBMIT_RESP] "
+    elseif v_command == 0x80000005 then
+        parse_response(buf(0,(buf(0,4):uint())), t)
+        info=info.."[DELIVER_RESP] "
     elseif v_command == 0x80000001 then
-        parse_connect_resp(buf, t)
+        parse_connect_resp(buf(0,(buf(0,4):uint())), t)
+        info=info.."[CONNECT_RESP] "
     else
         if (buf_len > 12) then
-            t:add(f_data, buf(12, buf_len - 12))
+            t:add(f_data, buf(0, buf_len - 4))
         end
     end
-    return true
+
+    return buf(0,4):uint();
 end
 
+
+
+
+
+
+
+
 function p_cmppv2.dissector(buf,pkt,root)
+    info=""
     -- 解析 CMPPv2
-    if not cmppv2_dissector(buf,pkt,root) then
-        -- 使用默认输出
-        Dissector.get("data"):call(buf, pkt, root)
+    local x = 0;
+    local len = buf:len();
+    local count =0;
+    while x < len do
+        count=count+1;
+        if count>=10 then
+            return
+        end
+
+        local readLen=cmppv2_dissector(buf(x,len-x),pkt,root);
+        if readLen > -1 then
+            x=x+readLen;
+            print(x.."/"..len);
+        else
+            return
+        end
+
     end
+
+    -- if cmppv2_dissector(buf,pkt,root) < buf.len()
+    --     -- 使用默认输出
+    --     Dissector.get("data"):call(buf, pkt, root)
+    -- --else
+    -- --    if buf.len()>=12 then
+    -- --        cmppv2_dissector(buf,pkt,root)
+    -- --    end
+    -- end
+    pkt.cols.info=info..tostring(pkt.cols.info)
+
 end
 
 DissectorTable.get("tcp.port"):add(7890, p_cmppv2)
