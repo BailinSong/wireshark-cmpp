@@ -1,7 +1,16 @@
 -- CMPPv2.lua
 -- author: zhanghaifeng
+-- editer: reindeer.bailin
 
 local p_cmppv2 = Proto("CMPPv2", "China Mobile Peer to Peer Protocol v2.0")
+
+local f_connect = ProtoField.bytes("CMPPv2.CONNECT","CONNECT")
+local f_submit = ProtoField.bytes("CMPPv2.SUBMIT","SUBMIT")
+local f_deliver = ProtoField.bytes("CMPPv2.DELIVER0","DELIVER")
+local f_submit_resp = ProtoField.bytes("CMPPv2.SUBMIT_RESP","SUBMIT_RESP")
+local f_deliver_resp = ProtoField.bytes("CMPPv2.DELIVER_RESP","DELIVER_RESP")
+local f_connect_resp = ProtoField.bytes("CMPPv2.CONNECT_RESP","CONNECT_RESP")
+
 local f_length = ProtoField.uint32("CMPPv2.length","MsgLength(消息长度)",base.DEC)
 local f_command_id = ProtoField.uint32("CMPPv2.commandId","CommandId(消息类型)",base.HEX,{
     [1] = "Connect",
@@ -99,15 +108,24 @@ local f_version = ProtoField.uint8("CMPPv2.version","Version(版本号)")
 local f_timestamp = ProtoField.uint32("CMPPv2.timestamp","Timestamp(时间戳)")
 local f_status = ProtoField.uint8("CMPPv2.status","Status(状态)", base.DEC, {[0] = "成功"})
 local f_authenticator_ismg = ProtoField.string("CMPPv2.authenticatorIsmg","AuthenticatorIsmg(短信网关认证码)")
-local f_msg_content_header = ProtoField.bytes("CMPPv2.messageContentHeader", "Header(首部)")
+
+local f_msg_content_header = ProtoField.bytes("CMPPv2.messageContentHeader", "Header(内容头部)")
+local f_msg_content_header_len = ProtoField.uint8("CMPPv2.messageContentHeader.len", "Udhi(剩余部分)")
+local f_msg_content_header_nolen = ProtoField.uint8("CMPPv2.messageContentHeader.nolen", "Udhi(标识长度)")
+local f_msg_content_header_no = ProtoField.uint8("CMPPv2.messageContentHeader.no", "Udhi(标识)")
+local f_msg_content_header_t = ProtoField.uint8("CMPPv2.messageContentHeader.t", "Udhi(总条数)")
+local f_msg_content_header_c = ProtoField.uint8("CMPPv2.messageContentHeader.c", "Udhi(当前)")
 
 p_cmppv2.fields = {
+    f_connect,f_submit,f_deliver ,f_submit_resp,f_deliver_resp,f_connect_resp,
     f_length, f_command_id, f_sequence_id, f_data, f_result, f_dest_user_count, f_dest_terminal_id,
     f_fee_type, f_fee_value, f_valid_time, f_at_time, f_tp_pid, f_tp_udhi, f_msg_fmt, f_message_length, f_msg_content,
     f_message_id, f_pk_total, f_pk_number, f_registered_delivery, f_message_level, f_service_id, f_fee_user_type,
     f_fee_terminal_id, f_message_src, f_src_id, f_reserved, f_msg_id_timestamp, f_msg_id_sgw_id, f_msg_id_sequence,
     f_SrcTerminalId, f_dest_id, f_content_msg_id, f_content_stat, f_content_submit_time, f_content_done_time,
-    f_content_dest_terminal_id, f_content_sequence, f_is_delivery_report, f_msg_content_header
+    f_content_dest_terminal_id, f_content_sequence, f_is_delivery_report, f_msg_content_header,f_msg_content_header_len,
+    f_msg_content_header_nolen,f_msg_content_header_no,f_msg_content_header_t,f_msg_content_header_c,
+
 }
 
 -- 处理MessageId：除MessageId本身外，还解析其中包含的时间戳、网关Id和序列号
@@ -135,7 +153,25 @@ local function process_content(buf, pos, length, udhi, encoding, t)
     local head_length
     if (udhi == 1) then
         head_length = buf(pos, 1):uint() + 1
-        node:add(f_msg_content_header, buf(pos, head_length))
+        -- local udhiNode=node:add(f_msg_content_header, buf(pos, head_length))
+        node:add(f_msg_content_header_len,buf(pos, 1))
+        node:add(f_msg_content_header_nolen,buf(pos+1, 1))
+        node:add(f_msg_content_header_len,buf(pos+2, 1))
+
+        if head_length == 6 then
+            node:add(f_msg_content_header_no,buf(pos+3, 1))
+            node:add(f_msg_content_header_t,buf(pos+4, 1))
+            node:add(f_msg_content_header_c,buf(pos+5, 1))
+        end
+
+        if head_length == 7 then
+            node:add(f_msg_content_header_no,buf(pos+3, 2))
+            node:add(f_msg_content_header_t,buf(pos+5, 1))
+            node:add(f_msg_content_header_c,buf(pos+6, 1))
+        end
+
+
+
     else
         head_length = 0
     end
@@ -180,7 +216,7 @@ local function parse_submit(buf, t)
 
     local user_num = buf(128, 1):uint();
     local pos = 129
-    for i = 1, user_num do
+    for _ = 1, user_num do
         t:add(f_dest_terminal_id, buf(pos, 21))
         pos = pos + 21
     end
@@ -230,6 +266,9 @@ end
 
 local info="";
 
+
+
+
 local function cmppv2_dissector(buf,pkt,root)
     local buf_len = buf:len();
     if buf_len < 8 or buf(0,4):uint() > buf_len then
@@ -238,35 +277,52 @@ local function cmppv2_dissector(buf,pkt,root)
 
     pkt.cols.protocol = "CMPP"
 
-
-
-    local t = root:add(p_cmppv2, buf(0, buf(0,4):uint()))
-    t:add(f_length, buf(0,4))
-    t:add(f_command_id, buf(4,4))
-    t:add(f_sequence_id, buf(8,4))
-
     local v_command = buf(4,4):uint()
     if v_command == 1 then
+        local t = root:add(f_connect, buf(0, buf(0,4):uint()))
+        t:add(f_length, buf(0,4))
+        t:add(f_command_id, buf(4,4))
+        t:add(f_sequence_id, buf(8,4))
         parse_connect(buf(0,(buf(0,4):uint())), t)
-        info=info.."[CONNECT] "
+        info=info.."[C]"
     elseif v_command == 4 then
+        local t = root:add(f_submit, buf(0, buf(0,4):uint()))
+        t:add(f_length, buf(0,4))
+        t:add(f_command_id, buf(4,4))
+        t:add(f_sequence_id, buf(8,4))
         parse_submit(buf(0,(buf(0,4):uint())), t)
-        info=info.."[SUBMIT] "
+        info=info.."[S]"
     elseif v_command == 5 then
+        local t = root:add(f_deliver, buf(0, buf(0,4):uint()))
+        t:add(f_length, buf(0,4))
+        t:add(f_command_id, buf(4,4))
+        t:add(f_sequence_id, buf(8,4))
         if parse_deliver(buf(0,(buf(0,4):uint())), t) == 0 then
-            info=info.."[DELIVER:MESSAGE] "
+            info=info.."[D:M]"
         else
-            info=info.."[DELIVER:REPORT] "
+            info=info.."[D:R]"
         end
     elseif v_command == 0x80000004 then
+        local t = root:add(f_submit_resp, buf(0, buf(0,4):uint()))
+        t:add(f_length, buf(0,4))
+        t:add(f_command_id, buf(4,4))
+        t:add(f_sequence_id, buf(8,4))
         parse_response(buf(0,(buf(0,4):uint())), t)
-        info=info.."[SUBMIT_RESP] "
+        info=info.."[S_R]"
     elseif v_command == 0x80000005 then
+        local t = root:add(f_deliver_resp, buf(0, buf(0,4):uint()))
+        t:add(f_length, buf(0,4))
+        t:add(f_command_id, buf(4,4))
+        t:add(f_sequence_id, buf(8,4))
         parse_response(buf(0,(buf(0,4):uint())), t)
-        info=info.."[DELIVER_RESP] "
+        info=info.."[D_R]"
     elseif v_command == 0x80000001 then
+        local t = root:add(f_connect_resp, buf(0, buf(0,4):uint()))
+        t:add(f_length, buf(0,4))
+        t:add(f_command_id, buf(4,4))
+        t:add(f_sequence_id, buf(8,4))
         parse_connect_resp(buf(0,(buf(0,4):uint())), t)
-        info=info.."[CONNECT_RESP] "
+        info=info.."[C_R]"
     else
         if (buf_len > 12) then
             t:add(f_data, buf(0, buf_len - 4))
@@ -276,45 +332,42 @@ local function cmppv2_dissector(buf,pkt,root)
     return buf(0,4):uint();
 end
 
+local function pkg_dissector( buf,pkt,root )
+    -- 解析 CMPPv2
+    local offset = pkt.desegment_offset or 0;
+    local len = buf:len();
+    local r=root:add(p_cmppv2, buf(0, len))
+    while true do
+        --获取要读取的数据长度
+        local pkgLen = buf(offset,4):uint();
+        --计算出下一个pdu的起始位置
+        local nxtpdu = offset + pkgLen;
 
 
+        if nxtpdu>len then
+            pkt.desegment_len = nxtpdu - buf:len()
+            pkt.desegment_offset = offset
+            return;
+        end
 
+        cmppv2_dissector(buf(offset,pkgLen),pkt,r);
 
+        offset = nxtpdu;
 
+        if nxtpdu == buf:len() then
+
+            return;
+        end
+    end
+end
 
 
 function p_cmppv2.dissector(buf,pkt,root)
     info=""
-    -- 解析 CMPPv2
-    local x = 0;
-    local len = buf:len();
-    local count =0;
-    while x < len do
-        count=count+1;
-        if count>=10 then
-            return
-        end
 
-        local readLen=cmppv2_dissector(buf(x,len-x),pkt,root);
-        if readLen > -1 then
-            x=x+readLen;
-            print(x.."/"..len);
-        else
-            return
-        end
+    pkg_dissector(buf,pkt,root);
 
-    end
-
-    -- if cmppv2_dissector(buf,pkt,root) < buf.len()
-    --     -- 使用默认输出
-    --     Dissector.get("data"):call(buf, pkt, root)
-    -- --else
-    -- --    if buf.len()>=12 then
-    -- --        cmppv2_dissector(buf,pkt,root)
-    -- --    end
-    -- end
     pkt.cols.info=info..tostring(pkt.cols.info)
-
 end
 
 DissectorTable.get("tcp.port"):add(7890, p_cmppv2)
